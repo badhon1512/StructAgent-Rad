@@ -309,13 +309,26 @@ def run_enhanced_agent_pipeline(free_text: str, revision_rounds: int, select_fin
             print("[agent] No actionable feedback found; stopping critique loop.")
             break
 
-        revision_prompt = base_agent.build_revision_prompt(
-            free_text,
-            current_report,
-            findings_feedback,
-            anatomy_feedback,
+        # Apply findings feedback first, then anatomy feedback — each in its own call
+        # so the model only handles one concern at a time.
+        intermediate = current_report
+        has_findings = bool(
+            findings_feedback.get("missing_findings") or findings_feedback.get("unsupported_findings")
         )
-        revised_report = base_agent.call_llm(revision_prompt).strip()
+        has_anatomy = bool(
+            anatomy_feedback.get("wrong_section_findings") or anatomy_feedback.get("duplicate_findings")
+        )
+        if has_findings:
+            intermediate = base_agent.call_llm(
+                base_agent.build_findings_revision_prompt(free_text, current_report, findings_feedback)
+            ).strip()
+            print(f"[agent] After findings revision:\n{intermediate}")
+        if has_anatomy:
+            intermediate = base_agent.call_llm(
+                base_agent.build_anatomy_revision_prompt(intermediate, anatomy_feedback)
+            ).strip()
+            print(f"[agent] After anatomy revision:\n{intermediate}")
+        revised_report = intermediate
         print(f"Revised structured report response:\n{revised_report}")
 
         if revised_report == current_report:

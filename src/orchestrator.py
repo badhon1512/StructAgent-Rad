@@ -460,15 +460,51 @@ def run_orchestrator_agent_pipeline(
             _print_raw("Anatomy judge", anatomy_raw)
 
         elif action == "revise_report":
-            revision_prompt = workflow.base_agent.build_revision_prompt(
-                free_text, current_report, findings_feedback, anatomy_feedback,
+            # Apply findings and anatomy feedback in separate calls so the model
+            # handles one concern at a time rather than all four feedback types at once.
+            has_findings = bool(
+                findings_feedback.get("missing_findings") or findings_feedback.get("unsupported_findings")
             )
-            revised_report = workflow.base_agent.call_llm(revision_prompt).strip()
-            prompt_log.append({
-                "step": tool_call, "agent": "revision", "tool_call": tool_call,
-                "prompt": revision_prompt,
-                "response": revised_report,
-            })
+            has_anatomy = bool(
+                anatomy_feedback.get("wrong_section_findings") or anatomy_feedback.get("duplicate_findings")
+            )
+            intermediate = current_report
+            if has_findings:
+                findings_rev_prompt = workflow.base_agent.build_findings_revision_prompt(
+                    free_text, current_report, findings_feedback,
+                )
+                intermediate = workflow.base_agent.call_llm(findings_rev_prompt).strip()
+                prompt_log.append({
+                    "step": tool_call, "agent": "revision_findings", "tool_call": tool_call,
+                    "prompt": findings_rev_prompt,
+                    "response": intermediate,
+                })
+                _sep("After Findings Revision")
+                _print_report(intermediate)
+            if has_anatomy:
+                anatomy_rev_prompt = workflow.base_agent.build_anatomy_revision_prompt(
+                    intermediate, anatomy_feedback,
+                )
+                intermediate = workflow.base_agent.call_llm(anatomy_rev_prompt).strip()
+                prompt_log.append({
+                    "step": tool_call, "agent": "revision_anatomy", "tool_call": tool_call,
+                    "prompt": anatomy_rev_prompt,
+                    "response": intermediate,
+                })
+                _sep("After Anatomy Revision")
+                _print_report(intermediate)
+            revised_report = intermediate
+            if not has_findings and not has_anatomy:
+                # Fallback: no actionable feedback — use combined prompt to avoid a no-op
+                fallback_prompt = workflow.base_agent.build_revision_prompt(
+                    free_text, current_report, findings_feedback, anatomy_feedback,
+                )
+                revised_report = workflow.base_agent.call_llm(fallback_prompt).strip()
+                prompt_log.append({
+                    "step": tool_call, "agent": "revision", "tool_call": tool_call,
+                    "prompt": fallback_prompt,
+                    "response": revised_report,
+                })
             if not revised_report or revised_report == current_report:
                 print("  ⚠ Revision produced no change — stopping.")
                 stop_reason = "revision_no_change"

@@ -95,6 +95,7 @@ Core rule:
 - Do not guess, infer from general radiology knowledge, or add routine normal findings.
 - If a finding is uncertain or not clearly supported by SOURCE, leave it out.
 - If you are not sure about a finding, do not include it in either list.
+- Be conservative. False alarms cause harmful report revisions.
 
 The structured report should use these allowed sections:
 {ALLOWED_SECTIONS}
@@ -107,12 +108,19 @@ A SOURCE finding is missing only if its clinical meaning is absent from every se
 
 Rules:
 - Check each SOURCE finding against all STRUCTURED sections.
-- Split combined SOURCE sentences into separate findings by clinical meaning.
-- Accept synonyms, paraphrases, abbreviations, and concise equivalents as present.
+- Ignore section placement. A finding is present even if it is in the wrong section.
+- Accept synonyms, paraphrases, abbreviations, shortened wording, and concise equivalents as present.
+- Accept split coverage. If SOURCE says "no pleural effusion or pneumothorax" and STRUCTURED has
+  "No pleural effusion" plus "No pneumothorax" separately, nothing is missing.
+- Accept combined coverage. If SOURCE has separate findings and STRUCTURED combines them into one
+  clinically equivalent bullet, nothing is missing.
+- Do not require exact wording. Do not mark a finding missing just because STRUCTURED uses a different
+  grammar, tense, negation phrase, or section heading.
 - Do not flag wrong-section placement as missing.
 - If only part of a combined SOURCE finding is absent, report only the absent part.
-- Only reportv a finding is mising when you are confident it is not present in any form in STRUCTURED.
+- Only report a finding as missing when you are confident it is not present in any form in STRUCTURED.
 - It is better to not report a finding as missing than to report it incorrectly.
+- Be conservative. False alarms cause harmful report revisions.
 
 Output: missing_findings
 - "finding": copy the finding text from SOURCE.
@@ -127,19 +135,29 @@ How to find unsupported findings:
 - If SOURCE contains it (even with slightly different wording), it is NOT unsupported.
 - Only report it as unsupported if it is truly absent from SOURCE.
 - Being in the wrong section is NOT unsupported. Only flag it if SOURCE does not mention it at all.
+- Do not flag a harmless paraphrase as unsupported.
+- Do flag placeholder or explanatory text if it appears as a finding and is not in SOURCE, such as
+  "(No findings)", "(Empty)", notes, caveats, or instructions.
 
 Output: unsupported_findings
 - "finding": copy the finding text from STRUCTURED.
-- "current_section": the section it should be appeared in inside STRUCTURED.
+- "current_section": the section where it appears in STRUCTURED.
 
 ━━━ Important rules for both tasks ━━━━━━━━━━━━━━━━━━━━━━━
 - SOURCE is the only source of truth. Do not use radiology knowledge to add or infer findings.
 - Accept loose wording matches: "No pneumothorax" and "No pneumothorax is noted" are the same finding.
+- Treat clinically equivalent wording as present even when the anatomy term, negation phrase,
+  or level of detail differs slightly. Example: "No pleural fluid" and "No pleural effusion"
+  express the same clinical finding.
 - A finding cannot appear in both lists. If unsure, leave it out.
 
-Before writing your answer, re-read STRUCTURED above.
-For each finding you plan to mark as missing: confirm it does not appear anywhere in STRUCTURED.
-If you can see it in STRUCTURED (even with slightly different wording), remove it from your list.
+Required self-check before writing JSON:
+1. Re-read STRUCTURED.
+2. For each planned missing finding, search all STRUCTURED sections for equivalent meaning.
+3. If the meaning appears anywhere, remove it from missing_findings.
+4. For each planned unsupported finding, check whether SOURCE supports it directly or by paraphrase.
+5. If SOURCE supports it, remove it from unsupported_findings.
+6. Prefer empty arrays over uncertain feedback.
 
 Return JSON only:
 {{
@@ -151,11 +169,13 @@ Return JSON only:
   ]
 }}
 
+SOURCE:
+{free_text}
+
 STRUCTURED:
 {structured_report}
 
-SOURCE:
-{free_text}""".strip()
+""".strip()
 
 
 def build_anatomy_duplication_judge_prompt(structured_report: str) -> str:
@@ -171,11 +191,13 @@ A wrong-section finding is a finding that is placed under a section that does no
 the primary anatomical structure the finding describes.
 
 How to find wrong-section findings:
-- Read each finding in STRUCTURED and identify its primary anatomical subject.
-- Ask: does the current section match that primary anatomical subject?
-- If the current section is a reasonable match, do not flag it.
-- Only flag it if another section is clearly more appropriate.
-- If you are unsure or more than one section could apply, do not flag it.
+- Judge placement by the primary anatomical or device subject of each finding.
+- A finding is wrong-section only if its current section is clearly inappropriate and another allowed section is clearly better.
+- If the current section is clinically reasonable, do not flag it.
+- Do not move findings to Other when a specific anatomical or device section fits.
+- Use Other only for technique, image quality, exam limitations, or truly non-anatomical comments.
+- For findings involving multiple structures, keep the finding in the section that best captures its dominant clinical meaning.
+- Prefer empty feedback over uncertain feedback.
 - current_section and correct_section must always be different values.
   If they would be the same, do not include that entry.
 
@@ -203,6 +225,7 @@ Output: duplicate_findings
   if they are placed under Other.
 - A finding that mentions multiple anatomical structures may reasonably stay in its current section.
   Do not flag it unless the placement is clearly wrong.
+- Do not flag empty section headers here; the reviser/sanitizer should remove them.
 - If in doubt, leave it out.
 
 Return JSON only:
@@ -217,6 +240,119 @@ Return JSON only:
 
 STRUCTURED:
 {structured_report}""".strip()
+
+
+def build_findings_revision_prompt(
+    free_text: str,
+    current_report: str,
+    findings_feedback: dict,
+) -> str:
+    return f"""\
+You are a radiology report reviser.
+
+You are given:
+- SOURCE: the original free-text radiology report. This is the ground truth.
+- CURRENT: the current structured report that needs to be revised.
+- FINDINGS_FEEDBACK: lists missing findings and unsupported findings.
+
+Your task is to apply FINDINGS_FEEDBACK to CURRENT and produce a corrected structured report.
+SOURCE is the only ground truth. If any feedback contradicts SOURCE, ignore that feedback item.
+
+{ALLOWED_SECTIONS}
+
+━━━ TASK: Apply FINDINGS_FEEDBACK ━━━━━━━━━━━━━━━━━━━━━━━━
+
+missing_findings — add each listed finding to CURRENT:
+- Only add it if the finding is written in SOURCE.
+- Only add it if the same finding is not already present in CURRENT.
+- Add it once under the suggested section.
+
+unsupported_findings — remove each listed finding from CURRENT:
+- Only remove it if the finding is genuinely absent from SOURCE.
+- If SOURCE mentions it, do not remove it regardless of what the feedback says.
+
+━━━ Important rules ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- Each finding must appear exactly once in the final report. Never create duplicates.
+- Use only the allowed section headers listed above.
+- After all edits, delete any section that has no findings left.
+- Never output an empty section header.
+- Never write placeholder findings such as "No findings", "No findings.", "(No findings)",
+  "Empty", "(Empty)", "None", or "N/A".
+- Never describe the edits you made. Do not write reasons, notes, caveats, instructions,
+  or change summaries such as "duplicate findings have been removed".
+- Output only clinical findings supported by SOURCE/CURRENT; do not add administrative or explanatory bullets.
+- Do not change any finding that is not mentioned in the feedback.
+- Don't add or remove findings based on your own knowledge. Use only SOURCE and the feedback lists.
+- Remove placeholder normal statements unless they are explicitly supported by SOURCE.
+
+Return ONLY the revised structured radiology report.
+No explanations, notes, JSON, reasons, caveats, instructions, or change summaries.
+
+SOURCE:
+{free_text}
+
+CURRENT:
+{current_report}
+
+FINDINGS_FEEDBACK:
+{json.dumps(findings_feedback, indent=2, ensure_ascii=False)}
+""".strip()
+
+
+def build_anatomy_revision_prompt(
+    current_report: str,
+    anatomy_feedback: dict,
+) -> str:
+    return f"""\
+You are a radiology report reviser.
+
+You are given:
+- CURRENT: the current structured report that needs to be revised.
+- ANATOMY_FEEDBACK: lists wrong-section findings and duplicate findings.
+
+Your task is to apply ANATOMY_FEEDBACK to CURRENT and produce a corrected structured report.
+
+{ALLOWED_SECTIONS}
+
+━━━ TASK: Apply ANATOMY_FEEDBACK ━━━━━━━━━━━━━━━━━━━━━━━━━
+
+wrong_section_findings — move each listed finding to the correct section:
+- Move only the exact listed finding.
+- Remove the finding from current_section.
+- Add it once under correct_section.
+- The finding must appear in the new section only. Do not leave a copy in the old section.
+- If correct_section is not an allowed section, ignore that feedback item.
+
+duplicate_findings — remove the duplicate copy:
+- Must remove the finding from section_to_remove_the_finding_from.
+- Keep the copy in the other section untouched.
+
+━━━ Important rules ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- Each finding must appear exactly once in the final report. Never create duplicates.
+- Use only the allowed section headers listed above.
+- After all edits, delete any section that has no findings left.
+- Never output an empty section header.
+- Never create sections just to show that they are empty or normal.
+- Never write placeholder findings such as "No findings", "No findings.", "(No findings)",
+  "Empty", "(Empty)", "None", or "N/A".
+- Never describe the edits you made. Do not write reasons, notes, caveats, instructions,
+  or change summaries such as "duplicate findings have been removed".
+- Output only clinical findings already present in CURRENT; do not add administrative or explanatory bullets.
+- If moving or removing a finding leaves its old section empty, delete that section entirely.
+- Create a new section only when you are moving a listed finding into that section.
+- Do not add template sections that are not needed for the edited findings.
+- Do not move or rewrite any finding that is not explicitly listed in ANATOMY_FEEDBACK.
+- If feedback is ambiguous or impossible to apply exactly, leave the report unchanged except for deleting empty sections.
+
+Return ONLY the revised structured radiology report.
+No explanations, notes, JSON, reasons, caveats, instructions, or change summaries.
+
+CURRENT:
+{current_report}
+
+ANATOMY_FEEDBACK:
+{json.dumps(anatomy_feedback, indent=2, ensure_ascii=False)}
+""".strip()
 
 
 def build_revision_prompt(
